@@ -1,19 +1,19 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 
-const WOL_URL = "https://wol.jw.org/es/wol/h/r4/lp-s";
+const WOL_URL = "https://wol.jw.org/es/wol/h/r4/lp-s"; // WOL "Hoy"
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
 if (!DISCORD_WEBHOOK_URL) {
   throw new Error("Missing DISCORD_WEBHOOK_URL secret");
 }
 
+// Split long messages so Discord webhook doesn't reject (2000 char limit)
 function chunkText(text, maxLen = 1900) {
   const chunks = [];
   let remaining = text;
 
   while (remaining.length > maxLen) {
-    // try to cut on a paragraph break first
     let cut = remaining.lastIndexOf("\n\n", maxLen);
     if (cut < 800) cut = remaining.lastIndexOf("\n", maxLen);
     if (cut < 800) cut = maxLen;
@@ -26,6 +26,13 @@ function chunkText(text, maxLen = 1900) {
   return chunks;
 }
 
+function normalize(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
 async function fetchDailyText() {
   const { data } = await axios.get(WOL_URL, {
     headers: { "User-Agent": "Mozilla/5.0" },
@@ -33,44 +40,56 @@ async function fetchDailyText() {
 
   const $ = cheerio.load(data);
 
-  // Try to target the "today" content block
-  // WOL pages can vary, so we use best-effort selectors:
-  let mainText =
+  // Today's date in YOUR timezone (Pacific)
+  // Example output: "lunes, 2 de marzo"
+  const today = new Intl.DateTimeFormat("es-ES", {
+    timeZone: "America/Los_Angeles",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  }).format(new Date());
+
+  const todayKey = normalize(today);
+
+  // Get readable text
+  let text =
     $("#content").text() ||
     $("main").text() ||
     $("body").text();
 
-  mainText = mainText
+  text = text
     .replace(/\r/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // Optional cleanup: remove the big WOL header noise if it appears
-  mainText = mainText.replace(/BIBLIOTECA EN LÍNEA Watchtower[\s\S]*?Hoy\s*/i, "").trim();
+  // Split into blocks starting at weekday headings
+  const blocks = text.split(
+    /\n(?=Lunes|Martes|Mi[eé]rcoles|Jueves|Viernes|S[aá]bado|Domingo)\b/
+  );
 
-  // If it still contains multiple days, keep only the first day block
-  // We cut at the next weekday name if present.
-  const weekdayRegex = /\n(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo)\b/gi;
-  const matches = [...mainText.matchAll(weekdayRegex)];
-  if (matches.length > 1) {
-    // keep from first weekday occurrence to before second weekday
-    const start = matches[0].index ?? 0;
-    const end = matches[1].index ?? mainText.length;
-    mainText = mainText.slice(start, end).trim();
+  // Find the block that contains today's date
+  const todaysBlock = blocks.find((b) => normalize(b).includes(todayKey));
+
+  const greeting =
+    "🌅 **Buenos días, mis queridos hermanos y mis queridos pecadores espirituales.**";
+
+  if (!todaysBlock) {
+    // fallback (so it never fails silently)
+    return `${greeting}\n\n⚠️ No pude encontrar el texto exacto de hoy (**${today}**). Publicando el más cercano disponible.\n\n${
+      blocks[0] || text
+    }\n\n🔗 ${WOL_URL}`;
   }
 
-  const greeting = "🌅 **Buenos días, mis queridos hermanos y mis queridos pecadores espirituales.**";
-  const fullMessage = `${greeting}\n\n${mainText}\n\n🔗 ${WOL_URL}`;
-
-  return fullMessage;
+  return `${greeting}\n\n${todaysBlock.trim()}\n\n🔗 ${WOL_URL}`;
 }
 
 async function postToDiscordInChunks(fullMessage) {
   const parts = chunkText(fullMessage, 1900);
 
   for (let i = 0; i < parts.length; i++) {
-    const prefix = parts.length > 1 ? `**(Parte ${i + 1}/${parts.length})**\n` : "";
+    const prefix =
+      parts.length > 1 ? `**(Parte ${i + 1}/${parts.length})**\n` : "";
     await axios.post(DISCORD_WEBHOOK_URL, { content: prefix + parts[i] });
   }
 }
