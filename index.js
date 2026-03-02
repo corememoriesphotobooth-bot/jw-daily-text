@@ -20,7 +20,7 @@ async function fetchDailyText() {
     .trim()
     .slice(0, 1500);
 
-  return `**${title}**\n\n${cleaned}\n\nFuente: ${WOL_URL}`;
+ return `🌅 **Buenos días, mis queridos hermanos y mis queridos pecadores espirituales.**\n\n**${title}**\n\n${cleaned}\n\n🔗 ${WOL_URL}`;
 }
 
 async function postToDiscord(message) {
