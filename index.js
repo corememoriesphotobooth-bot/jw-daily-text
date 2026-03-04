@@ -1,101 +1,101 @@
 const axios = require("axios");
-const cheerio = require("cheerio");
+const fs = require("fs");
+const path = require("path");
+const { stripRtf } = require("striprtf");
 
-const WOL_URL = "https://wol.jw.org/es/wol/h/r4/lp-s"; // WOL "Hoy"
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
 
-if (!DISCORD_WEBHOOK_URL) {
-  throw new Error("Missing DISCORD_WEBHOOK_URL secret");
+const meses = [
+  "enero","febrero","marzo","abril","mayo","junio",
+  "julio","agosto","septiembre","octubre","noviembre","diciembre"
+];
+
+const weekday = "(?:Lunes|Martes|Miércoles|Miercoles|Jueves|Viernes|Sábado|Sabado|Domingo)";
+
+function esc(s){
+  return s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
 }
 
-// Split long messages so Discord webhook doesn't reject (2000 char limit)
-function chunkText(text, maxLen = 1900) {
-  const chunks = [];
-  let remaining = text;
-
-  while (remaining.length > maxLen) {
-    let cut = remaining.lastIndexOf("\n\n", maxLen);
-    if (cut < 800) cut = remaining.lastIndexOf("\n", maxLen);
-    if (cut < 800) cut = maxLen;
-
-    chunks.push(remaining.slice(0, cut).trim());
-    remaining = remaining.slice(cut).trim();
-  }
-
-  if (remaining.length) chunks.push(remaining);
-  return chunks;
+function normalize(t){
+  return t
+  .replace(/\r/g,"")
+  .replace(/[ \t]+\n/g,"\n")
+  .replace(/\n{3,}/g,"\n\n")
+  .trim();
 }
 
-function normalize(s) {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+async function rtfToText(rtf){
+  const out = stripRtf(rtf);
+  return typeof out === "string" ? out : out.result;
 }
 
-async function fetchDailyText() {
-  const { data } = await axios.get(WOL_URL, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
+async function main(){
 
-  const $ = cheerio.load(data);
+  const folder = "./rtf";
 
-  // Today's date in YOUR timezone (Pacific)
-  // Example output: "lunes, 2 de marzo"
-  const today = new Intl.DateTimeFormat("es-ES", {
-    timeZone: "America/Los_Angeles",
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-  }).format(new Date());
+  const now = new Date();
+  const day = now.getDate();
+  const monthName = meses[now.getMonth()];
 
-  const todayKey = normalize(today);
-
-  // Get readable text
-  let text =
-    $("#content").text() ||
-    $("main").text() ||
-    $("body").text();
-
-  text = text
-    .replace(/\r/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  // Split into blocks starting at weekday headings
-  const blocks = text.split(
-    /\n(?=Lunes|Martes|Mi[eé]rcoles|Jueves|Viernes|S[aá]bado|Domingo)\b/
+  const heading = new RegExp(
+    `\\b${weekday}\\s+${day}\\s+de\\s+${esc(monthName)}\\b`,
+    "i"
   );
 
-  // Find the block that contains today's date
-  const todaysBlock = blocks.find((b) => normalize(b).includes(todayKey));
+  const files = fs.readdirSync(folder).filter(f => f.endsWith(".rtf"));
 
-  const greeting =
-    "🌅 **Buenos días, mis queridos hermanos y mis queridos pecadores espirituales.**";
+  let found = null;
 
-  if (!todaysBlock) {
-    // fallback (so it never fails silently)
-    return `${greeting}\n\n⚠️ No pude encontrar el texto exacto de hoy (**${today}**). Publicando el más cercano disponible.\n\n${
-      blocks[0] || text
-    }\n\n🔗 ${WOL_URL}`;
+  for (const file of files){
+
+    const rtf = fs.readFileSync(path.join(folder,file),"utf8");
+
+    const text = normalize(await rtfToText(rtf));
+
+    const start = text.search(heading);
+
+    if(start === -1) continue;
+
+    const sliced = text.slice(start);
+
+    const nextHeading = new RegExp(
+      `\\n${weekday}\\s+\\d+\\s+de\\s+(?:${meses.map(esc).join("|")})`
+    );
+
+    const next = sliced.slice(1).search(nextHeading);
+
+    const block = normalize(
+      next === -1 ? sliced : sliced.slice(0,next+1)
+    );
+
+    found = block;
+
+    break;
+
   }
 
-  return `${greeting}\n\n${todaysBlock.trim()}\n\n🔗 ${WOL_URL}`;
+  if(!found) throw new Error("Entry not found");
+
+  const parts = found
+  .split(/\n\s*\n/)
+  .map(p => p.replace(/\n+/g," ").trim())
+  .filter(Boolean);
+
+  const headingLine = parts[0];
+  const verse = parts[1];
+  const paragraph = parts[2];
+
+  const intro =
+  "Buenos días, mis queridos hermanos y mis queridos pecadores espirituales este es el texto del dia de hoy\n\n";
+
+  const message =
+  intro +
+  `**${headingLine}**\n` +
+  `*${verse}*\n\n` +
+  `${paragraph}`;
+
+  await axios.post(WEBHOOK,{content:message});
+
 }
 
-async function postToDiscordInChunks(fullMessage) {
-  const parts = chunkText(fullMessage, 1900);
-
-  for (let i = 0; i < parts.length; i++) {
-    const prefix =
-      parts.length > 1 ? `**(Parte ${i + 1}/${parts.length})**\n` : "";
-    await axios.post(DISCORD_WEBHOOK_URL, { content: prefix + parts[i] });
-  }
-}
-
-(async () => {
-  const msg = await fetchDailyText();
-  await postToDiscordInChunks(msg);
-  console.log("Posted daily text.");
-})();
+main();
