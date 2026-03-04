@@ -26,11 +26,14 @@ function removeAccents(str) {
   return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
-// Simple RTF -> text (works well for these JW RTF files)
+// Simple RTF -> text (good for these JW RTF files)
 function rtfToText(rtf) {
   return rtf
     // paragraph markers -> newlines
     .replace(/\\par[d]?/g, "\n")
+    // RTF hyperlink control words sometimes appear as: {\*\hyperlink "url"} or \*hyperlink "url"
+    .replace(/\{\\\*\\hyperlink\s+"[^"]*"\}/gi, "")
+    .replace(/\\\*hyperlink\s+"[^"]*"\s*/gi, "")
     // hex chars like \'e1
     .replace(/\\'[0-9a-fA-F]{2}/g, (m) => {
       const hex = m.slice(2);
@@ -50,6 +53,20 @@ function rtfToText(rtf) {
     .replace(/\n[ \t]+\n/g, "\n\n");
 }
 
+// Final cleanup before sending to Discord
+function cleanForDiscord(s) {
+  return s
+    // remove any leftover hyperlink tokens
+    .replace(/\\\*hyperlink\s+"[^"]*"\s*/gi, "")
+    // remove any leftover RTF control words
+    .replace(/\\[a-zA-Z]+\d*\s?/g, "")
+    // normalize spaces
+    .replace(/[ \t]{2,}/g, " ")
+    // keep paragraph breaks clean
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 async function main() {
   if (!WEBHOOK) throw new Error("Missing DISCORD_WEBHOOK_URL secret");
 
@@ -63,39 +80,42 @@ async function main() {
   const day = now.getDate();
   const monthName = removeAccents(meses[now.getMonth()]).toLowerCase();
 
-  // Only match "4 de enero" (ignore weekday completely to avoid encoding issues)
-  const heading = new RegExp(`\\b${day}\\s+de\\s+${esc(monthName)}\\b`, "i");
+  // Match by "4 de enero" (ignore weekday completely to avoid encoding variations)
+  const dateRe = new RegExp(`\\b${day}\\s+de\\s+${esc(monthName)}\\b`, "i");
 
   let found = null;
+
+  // Build month list (accent-free, lowercase) for next-heading detection
+  const mesesNoAcc = meses.map(m => esc(removeAccents(m).toLowerCase())).join("|");
+  const nextHeadingRe = new RegExp(
+    `\\n(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo)\\s+\\d+\\s+de\\s+(?:${mesesNoAcc})\\b`,
+    "i"
+  );
 
   for (const file of files) {
     const rtf = fs.readFileSync(path.join(folder, file), "utf8");
 
-    // normalize + remove accents + lowercase
-    const text = removeAccents(normalize(rtfToText(rtf))).toLowerCase();
+    // Convert and normalize, then remove accents for robust matching
+    const rawText = normalize(rtfToText(rtf));
+    const textMatch = removeAccents(rawText).toLowerCase();
 
-    const start = text.search(heading);
+    const start = textMatch.search(dateRe);
     if (start === -1) continue;
 
-    // Find the start of the line that contains the date heading
-    const lineStart = text.lastIndexOf("\n", start);
+    // Find start of the line containing the heading
+    const lineStart = textMatch.lastIndexOf("\n", start);
     const sliceFrom = lineStart === -1 ? 0 : lineStart + 1;
 
-    const sliced = text.slice(sliceFrom);
+    const slicedMatch = textMatch.slice(sliceFrom);
 
-    // Next day heading is another "<number> de <month>"
-    const nextHeading = new RegExp(
-      `\\n(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo)\\s+\\d+\\s+de\\s+(?:${meses.map(m => esc(removeAccents(m).toLowerCase())).join("|")})\\b`,
-      "i"
-    );
+    const next = slicedMatch.slice(1).search(nextHeadingRe);
 
-    const next = sliced.slice(1).search(nextHeading);
+    // IMPORTANT: slice the ORIGINAL (rawText) in the same region for best output text quality
+    // We approximate by slicing rawText using the same indices from textMatch.
+    const slicedRaw = rawText.slice(sliceFrom);
+    const blockRaw = normalize(next === -1 ? slicedRaw : slicedRaw.slice(0, next + 1));
 
-    const block = normalize(
-      next === -1 ? sliced : sliced.slice(0, next + 1)
-    );
-
-    found = block;
+    found = blockRaw;
     break;
   }
 
@@ -107,22 +127,22 @@ async function main() {
     .map(p => p.replace(/\n+/g, " ").trim())
     .filter(Boolean);
 
-  // Expected:
-  // 0: heading line (e.g., "domingo 4 de enero")
-  // 1: verse line(s)
-  // 2: first paragraph
-  const headingLine = parts[0] || "";
-  const verse = parts[1] || "";
-  const paragraph = parts[2] || "";
+  const headingLine = cleanForDiscord(parts[0] || "");
+  const verse = cleanForDiscord(parts[1] || "");
+  const paragraph = cleanForDiscord(parts[2] || "");
 
   const intro =
     "Buenos días, mis queridos hermanos y mis queridos pecadores espirituales este es el texto del dia de hoy\n\n";
 
-  const message =
+  const formattedHeading =
+    headingLine ? headingLine.charAt(0).toUpperCase() + headingLine.slice(1) : "";
+
+  const message = cleanForDiscord(
     intro +
-    `**${headingLine.charAt(0).toUpperCase() + headingLine.slice(1)}**\n` +
+    `**${formattedHeading}**\n` +
     `*${verse}*\n\n` +
-    `${paragraph}`;
+    `${paragraph}`
+  );
 
   await axios.post(WEBHOOK, { content: message });
 }
