@@ -1,7 +1,6 @@
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { stripRtf } = require("striprtf");
 
 const WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
 
@@ -18,18 +17,37 @@ function esc(s){
 
 function normalize(t){
   return t
-  .replace(/\r/g,"")
-  .replace(/[ \t]+\n/g,"\n")
-  .replace(/\n{3,}/g,"\n\n")
-  .trim();
+    .replace(/\r/g,"")
+    .replace(/[ \t]+\n/g,"\n")
+    .replace(/\n{3,}/g,"\n\n")
+    .trim();
 }
 
-async function rtfToText(rtf){
-  const out = stripRtf(rtf);
-  return typeof out === "string" ? out : out.result;
+// Simple RTF -> text (works well for your JW RTF files)
+function rtfToText(rtf) {
+  return rtf
+    // convert paragraph markers to newlines
+    .replace(/\\par[d]?/g, "\n")
+    // remove common RTF control words (keep their content)
+    .replace(/\\'[0-9a-fA-F]{2}/g, (m) => {
+      // hex encoded chars like \'e1
+      const hex = m.slice(2);
+      return String.fromCharCode(parseInt(hex, 16));
+    })
+    .replace(/\\u(-?\d+)\??/g, (_, num) => {
+      let n = parseInt(num, 10);
+      if (n < 0) n = 65536 + n;
+      return String.fromCharCode(n);
+    })
+    // strip remaining control words and groups
+    .replace(/\\[a-zA-Z]+\d* ?/g, "")
+    .replace(/[{}]/g, "")
+    // cleanup spacing
+    .replace(/\n[ \t]+\n/g, "\n\n");
 }
 
 async function main(){
+  if (!WEBHOOK) throw new Error("Missing DISCORD_WEBHOOK_URL secret");
 
   const folder = "./rtf";
 
@@ -42,60 +60,11 @@ async function main(){
     "i"
   );
 
-  const files = fs.readdirSync(folder).filter(f => f.endsWith(".rtf"));
+  if (!fs.existsSync(folder)) throw new Error("Missing /rtf folder in repo");
+
+  const files = fs.readdirSync(folder).filter(f => f.toLowerCase().endsWith(".rtf"));
+  if (files.length === 0) throw new Error("No .rtf files found in /rtf");
 
   let found = null;
 
-  for (const file of files){
-
-    const rtf = fs.readFileSync(path.join(folder,file),"utf8");
-
-    const text = normalize(await rtfToText(rtf));
-
-    const start = text.search(heading);
-
-    if(start === -1) continue;
-
-    const sliced = text.slice(start);
-
-    const nextHeading = new RegExp(
-      `\\n${weekday}\\s+\\d+\\s+de\\s+(?:${meses.map(esc).join("|")})`
-    );
-
-    const next = sliced.slice(1).search(nextHeading);
-
-    const block = normalize(
-      next === -1 ? sliced : sliced.slice(0,next+1)
-    );
-
-    found = block;
-
-    break;
-
-  }
-
-  if(!found) throw new Error("Entry not found");
-
-  const parts = found
-  .split(/\n\s*\n/)
-  .map(p => p.replace(/\n+/g," ").trim())
-  .filter(Boolean);
-
-  const headingLine = parts[0];
-  const verse = parts[1];
-  const paragraph = parts[2];
-
-  const intro =
-  "Buenos días, mis queridos hermanos y mis queridos pecadores espirituales este es el texto del dia de hoy\n\n";
-
-  const message =
-  intro +
-  `**${headingLine}**\n` +
-  `*${verse}*\n\n` +
-  `${paragraph}`;
-
-  await axios.post(WEBHOOK,{content:message});
-
-}
-
-main();
+ 
