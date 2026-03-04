@@ -1,0 +1,8 @@
+{
+"name":"jw-daily-text",
+"version":"1.0.0",
+"dependencies":{
+"axios":"^1.7.2",
+"striprtf":"^1.0.27"
+}
+}
